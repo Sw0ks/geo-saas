@@ -1,0 +1,183 @@
+version: "3.9"
+
+# ─── Общие переменные окружения для бэкенда ────────────────────────────────────
+# Все Celery-сервисы используют тот же образ что и backend,
+# только отличается команда запуска.
+
+x-backend-env: &backend-env
+  env_file: .env
+  environment:
+    PYTHONUNBUFFERED: "1"
+    PYTHONDONTWRITEBYTECODE: "1"
+
+x-backend-build: &backend-build
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+
+x-backend-depends: &backend-depends
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-geo_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-geo_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-geo_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-geo_user} -d ${POSTGRES_DB:-geo_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  # ── Redis (broker + result backend для Celery) ────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  # ── FastAPI backend ────────────────────────────────────────────────────────────
+  backend:
+    <<: [*backend-build, *backend-env, *backend-depends]
+    restart: unless-stopped
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"
+    volumes:
+      - ./backend:/app
+    networks:
+      - internal
+      - external
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Celery Worker ─────────────────────────────────────────────────────────────
+  # Обрабатывает тяжёлые задачи: мониторинг (Playwright) и генерацию контента (Claude)
+  # Concurrency=2 — не более двух одновременных тяжёлых задач
+  celery-worker:
+    <<: [*backend-build, *backend-env, *backend-depends]
+    restart: unless-stopped
+    command: >
+      celery -A app.core.celery_app.celery_app worker
+             --loglevel=info
+             --concurrency=2
+             --queues=monitoring,content,default
+             --hostname=worker@%h
+    volumes:
+      - ./backend:/app
+    depends_on:
+      backend:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+      - external
+    # Playwright требует общий /dev/shm для headless Chromium
+    shm_size: "256mb"
+
+  # ── Celery Beat (планировщик) ──────────────────────────────────────────────────
+  # Запускает задачи по расписанию из celery_app.beat_schedule.
+  # Должен быть ОДИН экземпляр — иначе задачи дублируются.
+  celery-beat:
+    <<: [*backend-build, *backend-env, *backend-depends]
+    restart: unless-stopped
+    command: >
+      celery -A app.core.celery_app.celery_app beat
+             --loglevel=info
+             --scheduler celery.beat:PersistentScheduler
+             --schedule=/tmp/celerybeat-schedule
+    volumes:
+      - ./backend:/app
+      - celerybeat_schedule:/tmp   # Персистим файл расписания между рестартами
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+      - external
+
+  # ── Next.js Frontend ──────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://backend:8000
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - internal
+      - external
+
+  # ── Nginx (reverse proxy) ──────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx_certs:/etc/nginx/certs
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - external
+
+# ─── Volumes ──────────────────────────────────────────────────────────────────
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  celerybeat_schedule:
+    driver: local
+  nginx_certs:
+    driver: local
+
+# ─── Networks ─────────────────────────────────────────────────────────────────
+
+networks:
+  internal:
+    # Внутренняя сеть: backend ↔ postgres ↔ redis ↔ celery (не снаружи)
+    driver: bridge
+    internal: true
+  external:
+    # Внешняя сеть: nginx ↔ backend ↔ frontend (доступна снаружи через nginx)
+    driver: bridge

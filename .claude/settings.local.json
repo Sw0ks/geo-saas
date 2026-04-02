@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p \"/c/Users/rusla/geo-saas/frontend/app/api/auth/[...nextauth]\" \"/c/Users/rusla/geo-saas/frontend/components/ui\")",
+      "Bash(touch \"/c/Users/rusla/geo-saas/frontend/app/api/auth/[...nextauth]/route.ts\" \"/c/Users/rusla/geo-saas/frontend/middleware.ts\" \"/c/Users/rusla/geo-saas/frontend/next.config.ts\" \"/c/Users/rusla/geo-saas/frontend/tailwind.config.ts\" \"/c/Users/rusla/geo-saas/frontend/tsconfig.json\" \"/c/Users/rusla/geo-saas/frontend/app/layout.tsx\" \"/c/Users/rusla/geo-saas/frontend/components/ui/button.tsx\" \"/c/Users/rusla/geo-saas/frontend/components/ui/input.tsx\")",
+      "Bash(ls \"C:\\\\Users\\\\rusla\\\\geo-saas\\\\frontend\\\\components\"\" 2>/dev/null || echo \"NOT_EXISTS \")"
+    ]
+  }
+}
